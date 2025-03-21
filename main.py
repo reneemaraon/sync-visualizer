@@ -10,10 +10,13 @@ import fitz  # PyMuPDF for PDF rendering
 class ScoreViewer(QWidget):
     def __init__(self, pdf_path, json_path, audio_path, timestamps_path):
         super().__init__()
+
+        #files
         self.pdf_path = pdf_path
         self.json_path = json_path
         self.audio_path = audio_path
         self.timestamps_path = timestamps_path
+        self.current_index = 0
         
         self.current_page = 0
         self.load_measure_data()
@@ -24,7 +27,8 @@ class ScoreViewer(QWidget):
     def load_measure_data(self):
         with open(self.json_path, 'r') as f:
             self.measure_boxes = json.load(f)["pages"]
-
+            self.page_measure_counts = [len(page["measures"]) for page in self.measure_boxes]
+            
         self.measure_timestamps = {}
         self.sorted_timestamps = []  # Store timestamps in order for binary search
         with open(self.timestamps_path, 'r') as f:
@@ -34,6 +38,20 @@ class ScoreViewer(QWidget):
                 timestamp = float(timestamp)
                 self.measure_timestamps[measure] = timestamp
                 self.sorted_timestamps.append((timestamp, measure))  # Store as tuple
+
+
+        
+
+    def find_measure_index_in_page(self, index_in_score):
+        cumulative_measures = 0
+    
+        for page_index, measure_count in enumerate(self.page_measure_counts):
+            if cumulative_measures + measure_count >= index_in_score:
+                return index_in_score - cumulative_measures  # Return the measure's index within the page
+            cumulative_measures += measure_count
+        
+        return -1
+
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -54,7 +72,8 @@ class ScoreViewer(QWidget):
     
     def load_page(self):
         self.scene.clear()
-    
+        self.measure_items = []
+
         # Load the expected page size from JSON
         page_size = self.measure_boxes[self.current_page]["size"]
         expected_width = page_size["width"]
@@ -100,45 +119,69 @@ class ScoreViewer(QWidget):
 
             self.measure_items.append((measure_number, rect))  # Store for later updates
 
+
     def measure_clicked(self, event):
         item = self.scene.itemAt(event.scenePos(), self.view.transform())
         if item and isinstance(item, QGraphicsRectItem):
             measure = item.data(0)
             if measure in self.measure_timestamps:
                 timestamp = self.measure_timestamps[measure]
+                if self.find_measure_index_in_page(self.current_index) - 1 < len(self.measure_items):
+                    self.measure_items[self.find_measure_index_in_page(self.current_index) - 1][1].setPen(Qt.GlobalColor.green)
+
+                self.current_index = measure - 1
+                self.measure_items[self.find_measure_index_in_page(measure) - 1][1].setPen(Qt.GlobalColor.red)
+
                 self.player.setPosition(int(timestamp * 1000))  # Convert to ms
                 self.player.play()
 
+
     def update_highlighted_measure(self, position: int):
-        """ Uses binary search to efficiently find and update the currently playing measure """
-        current_time = position / 1000.0  # Convert from ms to sec
+        """ Uses timestamps to update the currently playing measure only when reaching the next timestamp """
+        current_time = position / 1000.0  # Convert ms to sec
 
-        # Use binary search to find the latest measure that has started
-        index = bisect.bisect_right(self.sorted_timestamps, (current_time, float('inf'))) - 1
-        current_measure = self.sorted_timestamps[index][1] if index >= 0 else None
+        # Ensure we don't go out of bounds
+        if self.current_index + 1 >= len(self.sorted_timestamps):
+            return  # No more updates needed
 
-        # Update only if the measure has changed
-        if current_measure != getattr(self, "current_highlighted_measure", None):
-            self.current_highlighted_measure = current_measure
+        next_timestamp = self.sorted_timestamps[self.current_index + 1][0]  # Get next measure to highlight
+        prev_measure = self.sorted_timestamps[self.current_index][1]
+
+        if current_time >= next_timestamp:  # Only update when reaching the timestamp
+            self.current_index += 1
+            current_measure = self.sorted_timestamps[self.current_index][1]
+
 
             # Find which page this measure is on
             new_page = None
             global_measure_index = 0
 
-            for page_num, page_data in enumerate(self.measure_boxes):
-                num_measures = len(page_data["measures"])
-                if global_measure_index < current_measure <= global_measure_index + num_measures:
-                    new_page = page_num
-                    break
-                global_measure_index += num_measures
+            # for page_num, page_data in enumerate(self.measure_boxes):
+            #     num_measures = len(page_data["measures"])
+            #     if global_measure_index < current_measure <= global_measure_index + num_measures:
+            #         new_page = page_num
+            #         break
+            #     global_measure_index += num_measures
 
-            # If the page is different, update it
-            if new_page is not None and new_page != self.current_page:
-                self.current_page = new_page
-                self.load_page()
+            # # Change the page if needed
+            # if new_page is not None and new_page != self.current_page:
+            #     self.current_page = new_page
+            #     self.load_page()  # Reload the page and draw everything again
 
-            for measure_number, rect in self.measure_items:
-                rect.setPen(Qt.GlobalColor.red if measure_number == current_measure else Qt.GlobalColor.green)
+            # prev_measure.
+
+            self.measure_items[self.find_measure_index_in_page(prev_measure) - 1][1].setPen(Qt.GlobalColor.green)
+
+            # Get the global measure index range for the current page
+            start_measure = sum(self.page_measure_counts[:self.current_page]) + 1
+            end_measure = start_measure + self.page_measure_counts[self.current_page] - 1
+
+            # Check if current_measure is within this range
+            if start_measure <= current_measure <= end_measure:
+                page_index = self.find_measure_index_in_page(current_measure) - 1
+                if 0 <= page_index < len(self.measure_items):  # Ensure index is valid
+                    self.measure_items[page_index][1].setPen(Qt.GlobalColor.red)
+
 
     def load_audio(self):
         """ Load the audio and connect position updates """
